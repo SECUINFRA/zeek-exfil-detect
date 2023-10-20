@@ -1,0 +1,26 @@
+[package]
+script_dir = scripts
+build_command = ./configure && cd build && make
+test_command = cd testing && btest -c btest.cfg
+summary = This package offers the possibility of exfiltration detection through statistical analysis methods.
+description = This package offers the possibility of exfiltration detection through statistical analysis methods.
+	For this purpose, all connections are added to a baseline, subdivided according to their source 
+	ip address and destination port. The baseline is then used to perform statistical anomaly detection. 
+	Anomalies in the baseline are considered as data exfiltrations. 
+	The severity of the anomaly is recorded using a score between 0 and 1.
+tags = conn, exfil, exfiltration, TA0010
+depends =
+	zeek >=5.1.0
+suggests = 
+	https://github.com/salesforce/ja3 branch=master
+
+[template]
+source = https://github.com/zeek/package-template
+version = v2.0.0
+zkg_version = 2.13.0
+features = plugin
+
+[template_vars]
+name = exfil_detect
+namespace = Exfiltration
+

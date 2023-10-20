@@ -1,0 +1,261 @@
+%%{
+#include "zeek/Val.h"
+#include "zeek/ZVal.h"
+#include "zeek/Type.h"
+#include <vector>
+#include <sys/types.h>
+#include <cmath>
+#include <ctime>
+
+// custom compare function for sorting
+bool cmp_vec(std::optional<zeek::ZVal> a, std::optional<zeek::ZVal> b) 
+    {
+    return a.value().AsInt() < b.value().AsInt();
+    }
+struct cmp_rec 
+    {
+    cmp_rec(const char* r_v) 
+        { 
+        this->r_v = r_v;
+        }
+    bool operator ()(std::optional<zeek::ZVal> a, std::optional<zeek::ZVal>b)
+        {
+        int foo = a.value().AsRecord()->GetFieldAs<int>(r_v);
+        int bar = b.value().AsRecord()->GetFieldAs<int>(r_v);
+        return foo < bar;
+        }
+    const char* r_v;
+    };
+
+%%}
+
+
+module Exfiltration;
+
+
+## Calculates the median from a given numeric vector or vector of records
+##
+## v: numeric vector or vector with records containing numeric elements
+##
+## rec_value: record field to be used
+##
+## Returns: median value
+##
+function median%(v: any, rec_value: string &default=""%): double
+    %{
+    // check if parameter is from correct type
+    if ( v->GetType()->Tag() != zeek::TYPE_VECTOR ) 
+        {
+        zeek::emit_builtin_error("median() requires vector");
+        return NULL;
+        }
+
+    const auto& vv = v->zeek::Val::AsVectorVal()->RawVec();                 // not the best way, but no alternative
+
+    // check if vector is not empty
+    if ( vv->empty() ) 
+        {
+        zeek::emit_builtin_error("vector is empty");
+        return NULL;
+        }
+
+    const char* r_v = NULL;
+    if ( rec_value->ToStdString() != "" ) 
+        {
+        r_v = rec_value->ToStdString().c_str();
+        }
+
+    double median = 0;
+
+    size_t v_size = vv->size();
+    const auto middleItr = vv->begin() + (v_size / 2);
+
+    // sort vector
+    if ( r_v == NULL ) 
+        {
+        std::nth_element(vv->begin(), middleItr, vv->end(), cmp_vec);
+        }
+    else 
+        {
+        std::nth_element(vv->begin(), middleItr, vv->end(), cmp_rec(r_v));
+        }
+    if ( v_size % 2 == 0 ) 
+        {
+        if ( r_v == NULL )
+            {
+            const auto leftMiddleItr = std::max_element(vv->begin(), middleItr, cmp_vec);
+            median = (leftMiddleItr->value().AsInt() + middleItr->value().AsInt()) / 2;
+            }
+        else
+            {
+            const auto leftMiddleItr = std::max_element(vv->begin(), middleItr, cmp_rec(r_v));
+            median = (leftMiddleItr->value().AsRecord()->GetFieldAs<int>(r_v) + 
+                      middleItr->value().AsRecord()->GetFieldAs<int>(r_v)) / 2;
+            }
+        }
+    else 
+        {
+        if ( r_v == NULL )
+            {
+            median = middleItr->value().AsInt();
+            } 
+        else
+            {
+            median = middleItr->value().AsRecord()->GetFieldAs<int>(r_v);
+            }
+        }
+    return zeek::make_intrusive<zeek::DoubleVal>(median);
+    %}
+
+ 
+## Calculates the median-absolute-deviation (MAD) from a given numeric vector or vector of records
+##
+## v: numeric vector or vector with records containing numeric elements
+##
+## median: median from the given numeric vector
+##
+## rec_value: record field to be used
+##
+## Returns: MAD value
+##
+function mad%(v: any, median: double, rec_value: string &default=""%): double
+    %{
+    // check if parameter is from correct type
+    if ( v->GetType()->Tag() != zeek::TYPE_VECTOR )
+        {
+        zeek::emit_builtin_error("mad() requires vector");
+        return NULL;
+        }
+
+    const auto& vv = v->zeek::Val::AsVectorVal();
+
+    // check if vector is not empty
+    const auto& vvv = vv->RawVec();                         // not the best way, but no alternative
+    if ( vvv->empty() )
+        {
+        zeek::emit_builtin_error("vector is empty");
+        return NULL;
+        }
+
+    std::string r_v = rec_value->ToStdString();
+    double mad = 0;
+
+    // calculate absolute_deviation from given median
+    std::vector<double> *absolute_deviation = new std::vector<double>(vv->Size(), 0.0);
+    for ( size_t i = 0; i != absolute_deviation->size(); ++i )
+        {
+        if ( r_v == "" )
+            {
+            absolute_deviation->at(i) = std::abs(double(vv->IntAt(i)) - median);
+            }
+        else
+            {
+            absolute_deviation->at(i) = std::abs(double(vv->RecordValAt(i)->GetFieldAs<int>(r_v.c_str())) - median);
+            }
+        }
+
+    // calculate median from absolute_deviation
+    size_t v_size = absolute_deviation->size();
+    const auto middleItr = absolute_deviation->begin() + (v_size / 2);
+
+    std::nth_element(absolute_deviation->begin(), middleItr, absolute_deviation->end());
+    if ( v_size % 2 == 0 )
+        {
+        const auto leftMiddleItr = std::max_element(absolute_deviation->begin(), middleItr);
+        mad = (*leftMiddleItr + *middleItr) / 2;
+        }
+    else
+        {
+        mad = *middleItr;
+        }
+    return zeek::make_intrusive<zeek::DoubleVal>(mad);
+    %}
+
+
+## Calculates new mean from a given mean and new value. Its quite handy with streaming data
+##
+## old_mean: old mean value which a value is to be added
+##
+## n: number of mean values already processed
+##
+## new_value: new value to add to the mean
+##
+## Returns: new mean value
+##
+function add_to_mean%(old_mean: double, n: count, new_value: double %): double
+    %{
+    double new_mean = old_mean + ((new_value - old_mean) / n);
+    return zeek::make_intrusive<zeek::DoubleVal>(new_mean);
+    %}
+
+
+## Calculates new standard-deviation (std) from a given std and new value. Its quite handy with streaming data
+##
+## old_std: old std value which a value is to be added
+##
+## old_mean: mean value before the new value was added
+##
+## .. zeek:see:: add_to_mean
+##
+## new_mean: mean value after the new value was added
+##
+## .. zeek:see:: add_to_mean
+##
+## n: number of std values already processed
+##
+## new_value: new value to add to the std
+##
+## Returns: new std value
+##
+## .. note::
+##
+##      The method used is known as the "Welford Method". It was originally developed by B. P. Welford and 
+##      popularized by Knuth in The Art of Computer Programming (Vol. 2, Seminumerical Algorithms, 3rd ed., p. 232.).
+##
+function add_to_std%(old_std: double, old_mean: double, new_mean: double, n: count, new_value: double %): double
+    %{
+    double new_std = std::sqrt((old_std + ((new_value - new_mean) * (new_value - old_mean))) / n);
+    return zeek::make_intrusive<zeek::DoubleVal>(new_std);
+    %}
+
+
+## Calculates a normalized value in the range [0, 1] with the help from the tanh-estimator (hyperbolic tangent)
+##
+## value: value to be normalized
+##
+## mean: mean value over all (or a certain time) non-normalized values
+##
+## .. zeek:see:: add_to_mean
+##
+## std: standard-deviation value over all (or a certain time) non-normalized values
+##
+## .. zeek:see:: add_to_std
+##
+## Returns: normalized value
+##
+function tanh_normalization%(value: double, mean: double, std: double %): double
+    %{
+    double new_value = std::tanh(0.01 * ((value - mean) / std));
+    return zeek::make_intrusive<zeek::DoubleVal>(new_value);
+    %}
+
+
+## Removes time from zeek `time` Type. (Set Time Information to 00:00:00)
+##
+## value: DateTime Variable
+##
+## Returns: DateTime without Time
+##
+function strip_time_from_date%(datetime: time%): time
+    %{
+    std::time_t datetime_ns = static_cast<time_t>(datetime);
+
+    std::tm tm{};
+    tm.tm_year = std::localtime(&datetime_ns)->tm_year;
+    tm.tm_mon = std::localtime(&datetime_ns)->tm_mon;
+    tm.tm_mday = std::localtime(&datetime_ns)->tm_mday;
+    std::time_t date = std::mktime(&tm); 
+
+    return zeek::make_intrusive<zeek::TimeVal>(date);
+    %}
+
